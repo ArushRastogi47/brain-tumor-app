@@ -269,29 +269,29 @@ DESCRIPTION = """
 </div>
 """
 
-with gr.Blocks(
-    title="Brain Tumor Segmentation | Swin-EVDNet",
-    theme=gr.themes.Base(
-        primary_hue=gr.themes.colors.indigo,
-        neutral_hue=gr.themes.colors.slate,
-    ).set(
-        body_background_fill="#0f172a",
-        body_background_fill_dark="#0f172a",
-        block_background_fill="#1e293b",
-        block_background_fill_dark="#1e293b",
-        block_border_color="#334155",
-        block_border_color_dark="#334155",
-        input_background_fill="#0f172a",
-        input_background_fill_dark="#0f172a",
-        button_primary_background_fill="*primary_500",
-        button_primary_background_fill_hover="*primary_400",
-    ),
-    css="""
-      body { font-family: 'Inter', sans-serif; }
-      .gr-button-primary { font-weight: 600; border-radius: 8px; }
-      footer { display: none !important; }
-    """,
-) as demo:
+THEME = gr.themes.Base(
+    primary_hue=gr.themes.colors.indigo,
+    neutral_hue=gr.themes.colors.slate,
+).set(
+    body_background_fill="#0f172a",
+    body_background_fill_dark="#0f172a",
+    block_background_fill="#1e293b",
+    block_background_fill_dark="#1e293b",
+    block_border_color="#334155",
+    block_border_color_dark="#334155",
+    input_background_fill="#0f172a",
+    input_background_fill_dark="#0f172a",
+    button_primary_background_fill="*primary_500",
+    button_primary_background_fill_hover="*primary_400",
+)
+
+CUSTOM_CSS = """
+body { font-family: 'Inter', sans-serif; }
+.gr-button-primary { font-weight: 600; border-radius: 8px; }
+footer { display: none !important; }
+"""
+
+with gr.Blocks(title="Brain Tumor Segmentation | Swin-EVDNet") as demo:
     gr.HTML(DESCRIPTION)
 
     with gr.Row():
@@ -309,8 +309,7 @@ with gr.Blocks(
 
         with gr.Column(scale=2):
             gr.Markdown("### Output")
-            out_img  = gr.Image(label="Visualisation", type="filepath",
-                                show_download_button=True)
+            out_img  = gr.Image(label="Visualisation", type="filepath")
             out_text = gr.Markdown(label="Report")
 
     run_btn.click(
@@ -327,4 +326,4 @@ with gr.Blocks(
 """)
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(theme=THEME, css=CUSTOM_CSS, server_name="0.0.0.0", server_port=7860)
