@@ -35,7 +35,7 @@ NIfTI format (`.nii` or `.nii.gz`) to receive:
 | Epochs | 25 |
 | Framework | PyTorch + MONAI |
 
-Weights: [Hugging Face model repo](https://huggingface.co/arushrastogi/swin-evdnet)
+Weights: [Hugging Face model repo](https://huggingface.co/aryan09103/swin-evdnet)
 
 ---
 

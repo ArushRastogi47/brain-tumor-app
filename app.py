@@ -33,7 +33,7 @@ from preprocess import load_case
 # ---------------------------------------------------------------------------
 # Constants — update HF_MODEL_REPO after running Phase 6
 # ---------------------------------------------------------------------------
-HF_MODEL_REPO  = "arushrastogi/swin-evdnet"   # <-- update with your HF username
+HF_MODEL_REPO  = "aryan09103/swin-evdnet"
 WEIGHTS_FILE   = "best_slim.pt"
 SEG_THRESHOLD  = 0.5
 ROI_SIZE       = (96, 96, 96)
@@ -292,8 +292,7 @@ with st.sidebar:
     st.markdown("**Device:** `" + str(DEVICE) + "`")
     st.markdown("---")
     st.markdown(
-        "Weights: [HF model repo](https://huggingface.co/"
-        + HF_MODEL_REPO + ")"
+        "Weights: [HF model repo](https://huggingface.co/aryan09103/swin-evdnet)"
     )
 
 # ---------------------------------------------------------------------------
