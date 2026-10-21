@@ -48,11 +48,19 @@ def get_model() -> SwinEVDNet3D:
     global _MODEL
     if _MODEL is not None:
         return _MODEL
-    path = hf_hub_download(
-        repo_id=HF_MODEL_REPO,
-        filename=WEIGHTS_FILE,
-        token=os.environ.get("HF_TOKEN"),
-    )
+
+    local_path = os.environ.get("MODEL_WEIGHTS_PATH")
+    if local_path and os.path.isfile(local_path):
+        path = local_path
+        print(f"[model] Using local weights: {path}")
+    else:
+        print(f"[model] Downloading from HF: {HF_MODEL_REPO}/{WEIGHTS_FILE}")
+        path = hf_hub_download(
+            repo_id=HF_MODEL_REPO,
+            filename=WEIGHTS_FILE,
+            token=os.environ.get("HF_TOKEN"),
+        )
+
     model = SwinEVDNet3D(num_classes=3, encoder="swin")
     ckpt  = torch.load(path, map_location="cpu", weights_only=False)
     if isinstance(ckpt, dict) and "model" in ckpt and isinstance(ckpt["model"], dict):
@@ -64,6 +72,7 @@ def get_model() -> SwinEVDNet3D:
     state = {k.removeprefix("module."): v for k, v in state.items()}
     model.load_state_dict(state, strict=True)
     model.eval().to(DEVICE)
+    print(f"[model] Loaded ({sum(p.numel() for p in model.parameters())/1e6:.2f}M params) on {DEVICE}")
     _MODEL = model
     return model
 
