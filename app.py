@@ -162,7 +162,17 @@ def sliding_window_predict(model, image: torch.Tensor):
 # ---------------------------------------------------------------------------
 def run_segmentation(t1_file, t1ce_file, t2_file, flair_file, threshold):
     if any(f is None for f in [t1_file, t1ce_file, t2_file, flair_file]):
-        return None, "❌ Please upload all four MRI modalities."
+        error_html = """
+<div style="background:rgba(239, 68, 68, 0.12); border:1px solid rgba(239, 68, 68, 0.35); border-left:4px solid #ef4444; border-radius:10px; padding:1rem 1.25rem; color:#fca5a5; margin:0.5rem 0;">
+  <div style="font-weight:700; font-size:0.95rem; display:flex; align-items:center; gap:0.4rem; margin-bottom:0.25rem;">
+    <span>⚠️</span> Missing Input Files
+  </div>
+  <p style="font-size:0.85rem; margin:0; line-height:1.4;">
+    Please upload all four required MRI modalities (<strong>T1</strong>, <strong>T1ce</strong>, <strong>T2</strong>, and <strong>FLAIR</strong>) in .nii or .nii.gz format before running segmentation.
+  </p>
+</div>
+"""
+        return None, error_html
 
     from pathlib import Path
     paths = {
@@ -177,7 +187,15 @@ def run_segmentation(t1_file, t1ce_file, t2_file, flair_file, threshold):
         x, reference = load_patient_from_paths(paths)
         prob, unc, cls_alpha = sliding_window_predict(model, x)
     except Exception as e:
-        return None, f"❌ Error: {e}"
+        error_html = f"""
+<div style="background:rgba(239, 68, 68, 0.12); border:1px solid rgba(239, 68, 68, 0.35); border-left:4px solid #ef4444; border-radius:10px; padding:1rem 1.25rem; color:#fca5a5; margin:0.5rem 0;">
+  <div style="font-weight:700; font-size:0.95rem; display:flex; align-items:center; gap:0.4rem; margin-bottom:0.25rem;">
+    <span>❌</span> Processing Error
+  </div>
+  <p style="font-size:0.85rem; margin:0; line-height:1.4;">{str(e)}</p>
+</div>
+"""
+        return None, error_html
 
     mask = prob > threshold
 
@@ -189,6 +207,8 @@ def run_segmentation(t1_file, t1ce_file, t2_file, flair_file, threshold):
     cls_probs    = cls_alpha / cls_strength
     burden_idx   = int(np.argmax(cls_alpha))
     burden_name  = CLASS_NAMES[burden_idx]
+    seg_derived_idx = int(np.digitize(volume_ml, BURDEN_THRESHOLDS_ML, right=False))
+    seg_derived_name = CLASS_NAMES[seg_derived_idx]
     seg_unc_mean = float(unc[mask].mean()) if tumor_voxels > 0 else float("nan")
 
     # --- Mid-axial slice (through mask centre if tumour exists) ---
@@ -200,117 +220,529 @@ def run_segmentation(t1_file, t1ce_file, t2_file, flair_file, threshold):
     # T1 channel for background
     x_np  = x[0, 0].numpy()            # (D, H, W)
     bg    = x_np[mid_d]
-    p_sl  = prob[mid_d]
     u_sl  = unc[mid_d]
     m_sl  = mask[mid_d]
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4), facecolor="#0f172a")
-    plt.subplots_adjust(left=0.02, right=0.98, wspace=0.08)
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.2), facecolor="#0b0f19")
+    plt.subplots_adjust(left=0.03, right=0.97, top=0.88, bottom=0.08, wspace=0.12)
 
-    def _ax(ax, title):
-        ax.set_facecolor("#0f172a")
+    def _ax(ax, title, subtitle=""):
+        ax.set_facecolor("#0b0f19")
         ax.axis("off")
-        ax.set_title(title, color="#e2e8f0", fontsize=10, fontweight="bold", pad=5)
+        ax.set_title(title, color="#f1f5f9", fontsize=11, fontweight="bold", pad=8)
+        if subtitle:
+            ax.text(0.5, -0.06, subtitle, transform=ax.transAxes,
+                    color="#94a3b8", fontsize=8.5, ha="center")
 
-    _ax(axes[0], "T1 — mid-axial slice")
+    _ax(axes[0], "1. Anatomical T1", f"Mid-axial Slice Z={mid_d}")
     axes[0].imshow(bg, cmap="gray")
 
-    _ax(axes[1], f"Tumour mask  (thresh={threshold:.2f})")
-    axes[0].imshow(bg, cmap="gray")
+    _ax(axes[1], "2. Predicted Tumor Mask", f"Thresh = {threshold:.2f} · Vol = {volume_ml:.1f} mL")
     axes[1].imshow(bg, cmap="gray")
-    overlay = np.zeros((*m_sl.shape, 4))
-    overlay[m_sl] = [1.0, 0.2, 0.2, 0.55]
-    axes[1].imshow(overlay)
+    if m_sl.any():
+        overlay = np.zeros((*m_sl.shape, 4))
+        overlay[m_sl] = [0.96, 0.25, 0.37, 0.65]  # Crisp Rose/Crimson
+        axes[1].imshow(overlay)
+        axes[1].contour(m_sl, colors=["#f43f5e"], linewidths=1.2)
 
-    _ax(axes[2], "Evidential uncertainty")
+    _ax(axes[2], "3. Evidential Uncertainty", "Epistemic Uncertainty (2/S)")
     im = axes[2].imshow(u_sl, cmap="viridis")
     cb = plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
-    cb.ax.tick_params(colors="#94a3b8", labelsize=7)
+    cb.ax.tick_params(colors="#94a3b8", labelsize=8)
+    cb.outline.set_edgecolor("#334155")
 
     # Save to temp
     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    fig.savefig(tmp.name, bbox_inches="tight", dpi=120, facecolor="#0f172a")
+    fig.savefig(tmp.name, bbox_inches="tight", dpi=140, facecolor="#0b0f19")
     plt.close(fig)
 
-    # --- Result text ---
-    cls_bar = "  ".join(
-        f"{n.upper()}: {p*100:.1f}%"
-        for n, p in zip(CLASS_NAMES, cls_probs.tolist())
-    )
-    report = (
-        f"## Results\n"
-        f"| Metric | Value |\n"
-        f"|---|---|\n"
-        f"| Tumour voxels | {tumor_voxels:,} |\n"
-        f"| Tumour volume | {volume_ml:.1f} mL |\n"
-        f"| Burden class (seg-derived) | **{CLASS_NAMES[int(np.digitize(volume_ml, BURDEN_THRESHOLDS_ML, right=False))].upper()}** |\n"
-        f"| Burden class (model) | **{burden_name.upper()}** |\n"
-        f"| Model confidence | {cls_probs[burden_idx]*100:.1f}% |\n"
-        f"| Mean seg uncertainty | {seg_unc_mean:.4f} |\n\n"
-        f"**Burden probabilities:** {cls_bar}\n\n"
-        f"---\n"
-        f"*Research prototype. Not for medical diagnosis.*"
-    )
+    # --- Result report HTML ---
+    unc_str = f"{seg_unc_mean:.4f}" if not np.isnan(seg_unc_mean) else "N/A"
+    low_pct = float(cls_probs[0] * 100)
+    med_pct = float(cls_probs[1] * 100)
+    high_pct = float(cls_probs[2] * 100)
+
+    report = f"""
+<div class="results-container">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:0.5rem">
+    <div style="font-size:1.1rem; font-weight:700; color:#f8fafc; display:flex; align-items:center; gap:0.5rem">
+      <span>📊</span> Clinical Inference Telemetry
+    </div>
+    <span class="burden-pill {burden_name}">
+      {burden_name.upper()} BURDEN
+    </span>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="kpi-tile">
+      <div class="kpi-title">Tumor Volume</div>
+      <div class="kpi-num">{volume_ml:.1f} <span style="font-size:0.85rem; font-weight:500; color:#94a3b8">mL</span></div>
+      <div class="kpi-sub">{tumor_voxels:,} voxels</div>
+    </div>
+
+    <div class="kpi-tile">
+      <div class="kpi-title">Model Burden</div>
+      <div class="kpi-num" style="font-size:1.25rem"><span class="burden-pill {burden_name}">{burden_name.upper()}</span></div>
+      <div class="kpi-sub">Confidence: {cls_probs[burden_idx]*100:.1f}%</div>
+    </div>
+
+    <div class="kpi-tile">
+      <div class="kpi-title">Seg-Derived</div>
+      <div class="kpi-num" style="font-size:1.25rem"><span class="burden-pill {seg_derived_name}">{seg_derived_name.upper()}</span></div>
+      <div class="kpi-sub">Volume cutoffs</div>
+    </div>
+
+    <div class="kpi-tile">
+      <div class="kpi-title">Mean Epistemic Unc.</div>
+      <div class="kpi-num">{unc_str}</div>
+      <div class="kpi-sub">Evidential (2/S)</div>
+    </div>
+  </div>
+
+  <div class="prob-card">
+    <div style="font-size:0.8rem; font-weight:700; color:#cbd5e1; margin-bottom:0.6rem; text-transform:uppercase; letter-spacing:0.04em">
+      Burden Probability Distribution (Dirichlet α)
+    </div>
+    <div class="prob-item">
+      <div class="prob-header">
+        <span>Low Burden (&lt;64.9 mL)</span>
+        <span style="font-family:var(--font-mono)">{low_pct:.1f}%</span>
+      </div>
+      <div class="prob-track">
+        <div class="prob-bar bar-low" style="width: {low_pct:.1f}%"></div>
+      </div>
+    </div>
+    <div class="prob-item">
+      <div class="prob-header">
+        <span>Medium Burden (64.9–121.1 mL)</span>
+        <span style="font-family:var(--font-mono)">{med_pct:.1f}%</span>
+      </div>
+      <div class="prob-track">
+        <div class="prob-bar bar-medium" style="width: {med_pct:.1f}%"></div>
+      </div>
+    </div>
+    <div class="prob-item">
+      <div class="prob-header">
+        <span>High Burden (&gt;121.1 mL)</span>
+        <span style="font-family:var(--font-mono)">{high_pct:.1f}%</span>
+      </div>
+      <div class="prob-track">
+        <div class="prob-bar bar-high" style="width: {high_pct:.1f}%"></div>
+      </div>
+    </div>
+  </div>
+</div>
+"""
     return tmp.name, report
 
 
 # ---------------------------------------------------------------------------
-# Gradio UI
+# Gradio UI Design & Layout
 # ---------------------------------------------------------------------------
-DESCRIPTION = """
-<div style="text-align:center; padding:1rem 0">
-  <h1 style="font-size:2rem">🧠 Brain Tumor Segmentation</h1>
-  <p style="color:#94a3b8">Swin-EVDNet v2 · 3D evidential deep learning · BraTS 2023</p>
-  <div style="background:#7f1d1d;border-left:4px solid #ef4444;padding:0.7rem 1rem;
-              border-radius:6px;margin:1rem auto;max-width:600px;text-align:left">
-    ⚠️ <strong>Research prototype. Not for medical diagnosis.</strong>
-    Do not upload real patient data to a public server.
+HEADER_HTML = """
+<div class="app-header">
+  <div class="badge-row">
+    <span class="header-badge primary">🧠 Swin-EVDNet v2 3D</span>
+    <span class="header-badge success">● Engine Ready</span>
+    <span class="header-badge">BraTS 2023 Glioma</span>
+    <span class="header-badge">4.17M Parameters</span>
+  </div>
+  <h1 class="app-title">Brain Tumor Segmentation & Evidential Analysis</h1>
+  <p class="app-subtitle">
+    3D Swin Transformer with Evidential Deep Learning for multi-parametric MRI segmentation, volumetric quantification, and epistemic uncertainty mapping.
+  </p>
+  <div class="disclaimer-box">
+    <span style="font-size:1.25rem;">⚠️</span>
+    <div>
+      <strong>Research Prototype Only:</strong> This application is intended strictly for research and evaluation purposes and is not certified for clinical diagnostic decision-making.
+    </div>
   </div>
 </div>
 """
 
-THEME = gr.themes.Base(
+EMPTY_STATE_HTML = """
+<div class="empty-state">
+  <div class="empty-state-icon">🧠</div>
+  <h3>Model Ready for Inference</h3>
+  <p>Upload the four required MRI scans (<strong>T1</strong>, <strong>T1ce</strong>, <strong>T2</strong>, and <strong>FLAIR</strong>) in the left panel and click <strong>"Run Segmentation"</strong> to visualize 3D tumor contours and uncertainty maps.</p>
+</div>
+"""
+
+FOOTER_HTML = """
+<div class="app-footer">
+  <div>
+    <strong>Architecture:</strong> Swin-EVDNet v2 3D · <strong>Resolution:</strong> 1mm³ isotropic · <strong>Task:</strong> Whole Tumor (WT)
+  </div>
+  <div>
+    <strong>Weights:</strong> <a href="https://huggingface.co/aryan09103/swin-evdnet" target="_blank">aryan09103/swin-evdnet</a>
+  </div>
+</div>
+"""
+
+THEME = gr.themes.Soft(
     primary_hue=gr.themes.colors.indigo,
+    secondary_hue=gr.themes.colors.violet,
     neutral_hue=gr.themes.colors.slate,
+    font=[gr.themes.GoogleFont("Plus Jakarta Sans"), gr.themes.GoogleFont("Inter"), "sans-serif"],
 ).set(
-    body_background_fill="#0f172a",
-    body_background_fill_dark="#0f172a",
-    block_background_fill="#1e293b",
-    block_background_fill_dark="#1e293b",
-    block_border_color="#334155",
-    block_border_color_dark="#334155",
-    input_background_fill="#0f172a",
-    input_background_fill_dark="#0f172a",
-    button_primary_background_fill="*primary_500",
-    button_primary_background_fill_hover="*primary_400",
+    body_background_fill="#0b0f19",
+    body_background_fill_dark="#0b0f19",
+    block_background_fill="rgba(17, 24, 39, 0.75)",
+    block_background_fill_dark="rgba(17, 24, 39, 0.75)",
+    block_border_color="rgba(255, 255, 255, 0.08)",
+    block_border_color_dark="rgba(255, 255, 255, 0.08)",
+    input_background_fill="rgba(15, 23, 42, 0.9)",
+    input_background_fill_dark="rgba(15, 23, 42, 0.9)",
 )
 
 CUSTOM_CSS = """
-body { font-family: 'Inter', sans-serif; }
-.gr-button-primary { font-weight: 600; border-radius: 8px; }
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+body, .gradio-container {
+  font-family: var(--font-sans) !important;
+  background-color: #0b0f19 !important;
+  color: #f1f5f9 !important;
+}
+
+.gradio-container {
+  background: 
+    radial-gradient(circle at 12% 10%, rgba(99, 102, 241, 0.12) 0%, transparent 35%),
+    radial-gradient(circle at 88% 18%, rgba(139, 92, 246, 0.10) 0%, transparent 40%),
+    radial-gradient(circle at 50% 90%, rgba(6, 182, 212, 0.06) 0%, transparent 50%),
+    #0b0f19 !important;
+  max-width: 1380px !important;
+  margin: 0 auto !important;
+  padding: 1.25rem 1rem !important;
+}
+
+.app-header {
+  text-align: center;
+  padding: 1rem 1rem 1.75rem 1rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.app-title {
+  font-size: 2.15rem !important;
+  font-weight: 800 !important;
+  letter-spacing: -0.03em !important;
+  margin: 0.4rem 0 !important;
+  background: linear-gradient(135deg, #ffffff 20%, #e2e8f0 60%, #94a3b8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.app-subtitle {
+  color: #94a3b8;
+  font-size: 0.98rem;
+  max-width: 720px;
+  margin: 0 auto 1rem auto;
+  line-height: 1.5;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.header-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  border-radius: 9999px;
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+.header-badge.primary {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.35);
+  color: #a5b4fc;
+}
+
+.header-badge.success {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #6ee7b7;
+}
+
+.disclaimer-box {
+  background: rgba(239, 68, 68, 0.09);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-left: 4px solid #ef4444;
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  max-width: 680px;
+  margin: 0 auto;
+  text-align: left;
+  font-size: 0.83rem;
+  color: #fca5a5;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.btn-infer {
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #9333ea 100%) !important;
+  color: #ffffff !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  font-weight: 700 !important;
+  font-size: 1.02rem !important;
+  letter-spacing: 0.015em !important;
+  padding: 0.85rem 1.5rem !important;
+  border-radius: 10px !important;
+  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.4) !important;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  cursor: pointer !important;
+  margin-top: 0.6rem !important;
+}
+.btn-infer:hover {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 8px 26px rgba(124, 58, 237, 0.6) !important;
+}
+
+.file-upload-box {
+  border: 1px dashed rgba(255, 255, 255, 0.14) !important;
+  border-radius: 9px !important;
+  transition: all 0.2s ease !important;
+}
+.file-upload-box:hover {
+  border-color: rgba(99, 102, 241, 0.45) !important;
+  background: rgba(99, 102, 241, 0.03) !important;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.7rem;
+  margin: 0.85rem 0;
+}
+
+.kpi-tile {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  padding: 0.8rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+.kpi-tile:hover {
+  border-color: rgba(99, 102, 241, 0.4);
+  transform: translateY(-2px);
+}
+
+.kpi-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #94a3b8;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.3rem;
+}
+
+.kpi-num {
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: #f8fafc;
+  line-height: 1.1;
+  font-family: var(--font-sans);
+}
+
+.kpi-sub {
+  font-size: 0.72rem;
+  color: #64748b;
+  margin-top: 0.3rem;
+}
+
+.burden-pill {
+  display: inline-block;
+  padding: 0.22rem 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 800;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.burden-pill.low { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+.burden-pill.medium { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+.burden-pill.high { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+
+.prob-card {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 9px;
+  padding: 0.85rem 0.95rem;
+  margin-top: 0.75rem;
+}
+
+.prob-item {
+  margin-bottom: 0.6rem;
+}
+.prob-item:last-child {
+  margin-bottom: 0;
+}
+
+.prob-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #cbd5e1;
+  margin-bottom: 0.25rem;
+}
+
+.prob-track {
+  width: 100%;
+  height: 8px;
+  background: rgba(30, 41, 59, 0.8);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.prob-bar {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.bar-low { background: linear-gradient(90deg, #10b981, #34d399); }
+.bar-medium { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.bar-high { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+.empty-state {
+  text-align: center;
+  padding: 2.8rem 1.25rem;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  color: #64748b;
+}
+
+.empty-state-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.6rem;
+  opacity: 0.85;
+}
+
+.empty-state h3 {
+  color: #cbd5e1;
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.empty-state p {
+  font-size: 0.85rem;
+  max-width: 400px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+
+.app-footer {
+  margin-top: 1.75rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #64748b;
+  gap: 0.75rem;
+}
+
+.app-footer a {
+  color: #818cf8;
+  text-decoration: none;
+}
+.app-footer a:hover {
+  text-decoration: underline;
+}
+
 footer { display: none !important; }
 """
 
 with gr.Blocks(title="Brain Tumor Segmentation | Swin-EVDNet") as demo:
-    gr.HTML(DESCRIPTION)
+    gr.HTML(HEADER_HTML)
 
-    with gr.Row():
-        with gr.Column(scale=1):
-            gr.Markdown("### Upload MRI volumes (.nii or .nii.gz)")
-            t1_up    = gr.File(label="T1",    file_types=[".nii", ".gz"])
-            t1ce_up  = gr.File(label="T1ce",  file_types=[".nii", ".gz"])
-            t2_up    = gr.File(label="T2",    file_types=[".nii", ".gz"])
-            flair_up = gr.File(label="FLAIR", file_types=[".nii", ".gz"])
+    with gr.Row(equal_height=False):
+        # Left column: Controls & Uploads
+        with gr.Column(scale=5):
+            gr.HTML("""
+            <div class="section-title">
+              <span>📥</span> Modality Uploads (4 Scans Required)
+            </div>
+            """)
+            with gr.Row():
+                t1_up = gr.File(
+                    label="T1 (Native)",
+                    file_types=[".nii", ".gz"],
+                    elem_classes=["file-upload-box"],
+                )
+                t1ce_up = gr.File(
+                    label="T1ce (Contrast)",
+                    file_types=[".nii", ".gz"],
+                    elem_classes=["file-upload-box"],
+                )
+            with gr.Row():
+                t2_up = gr.File(
+                    label="T2 Weighted",
+                    file_types=[".nii", ".gz"],
+                    elem_classes=["file-upload-box"],
+                )
+                flair_up = gr.File(
+                    label="FLAIR Inversion",
+                    file_types=[".nii", ".gz"],
+                    elem_classes=["file-upload-box"],
+                )
+
+            gr.HTML("""
+            <div class="section-title" style="margin-top:1.25rem;">
+              <span>⚙️</span> Segmentation Sensitivity
+            </div>
+            """)
             threshold_sl = gr.Slider(
                 0.1, 0.9, value=SEG_THRESHOLD, step=0.05,
-                label="Segmentation threshold",
+                label="Probability Cutoff (Threshold)",
+                info="Default 0.50. Higher values yield high specificity; lower values capture diffuse edema margins.",
             )
-            run_btn = gr.Button("🔬 Run Segmentation", variant="primary")
+            run_btn = gr.Button("🔬 Run Segmentation & Uncertainty Profiling", variant="primary", elem_classes=["btn-infer"])
 
-        with gr.Column(scale=2):
-            gr.Markdown("### Output")
-            out_img  = gr.Image(label="Visualisation", type="filepath")
-            out_text = gr.Markdown(label="Report")
+        # Right column: Outputs & Telemetry
+        with gr.Column(scale=7):
+            gr.HTML("""
+            <div class="section-title">
+              <span>🖥️</span> Inference Visualisation & Clinical Report
+            </div>
+            """)
+            out_img = gr.Image(label="Multi-slice Segmentation & Epistemic Uncertainty", type="filepath")
+            out_text = gr.HTML(EMPTY_STATE_HTML, label="Clinical Report")
 
     run_btn.click(
         fn=run_segmentation,
@@ -318,12 +750,7 @@ with gr.Blocks(title="Brain Tumor Segmentation | Swin-EVDNet") as demo:
         outputs=[out_img, out_text],
     )
 
-    gr.Markdown("""
----
-**Model:** Swin-EVDNet v2 3D · 4.17M parameters · Trained 25 epochs on BraTS 2023 Adult Glioma  
-**Weights:** [aryan09103/swin-evdnet](https://huggingface.co/aryan09103/swin-evdnet)  
-**Burden categories** are whole-tumour volume tertiles from the training split — not HGG/LGG grade.
-""")
+    gr.HTML(FOOTER_HTML)
 
 if __name__ == "__main__":
     demo.launch(theme=THEME, css=CUSTOM_CSS, server_name="0.0.0.0", server_port=7860)
