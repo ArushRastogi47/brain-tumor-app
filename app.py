@@ -202,6 +202,7 @@ def run_segmentation(t1_file, t1ce_file, t2_file, flair_file, threshold):
     # --- Metrics ---
     tumor_voxels = int(mask.sum())
     voxel_ml = abs(float(np.linalg.det(reference.affine[:3, :3]))) / 1000.0
+    voxel_mm3 = abs(float(np.linalg.det(reference.affine[:3, :3])))
     volume_ml = tumor_voxels * voxel_ml
     cls_strength = float(cls_alpha.sum())
     cls_probs    = cls_alpha / cls_strength
@@ -209,7 +210,12 @@ def run_segmentation(t1_file, t1ce_file, t2_file, flair_file, threshold):
     burden_name  = CLASS_NAMES[burden_idx]
     seg_derived_idx = int(np.digitize(volume_ml, BURDEN_THRESHOLDS_ML, right=False))
     seg_derived_name = CLASS_NAMES[seg_derived_idx]
+    model_confidence = float(cls_probs[burden_idx] * 100.0)
+    cls_uncertainty = float(3.0 / cls_strength)
     seg_unc_mean = float(unc[mask].mean()) if tumor_voxels > 0 else float("nan")
+    seg_unc_max  = float(unc[mask].max()) if tumor_voxels > 0 else float("nan")
+    tumor_slices_count = int(np.count_nonzero(mask.any(axis=(1, 2))))
+    input_shape = tuple(int(s) for s in reference.shape[:3])
 
     # --- Mid-axial slice (through mask centre if tumour exists) ---
     if tumor_voxels > 0:
@@ -258,78 +264,200 @@ def run_segmentation(t1_file, t1ce_file, t2_file, flair_file, threshold):
 
     # --- Result report HTML ---
     unc_str = f"{seg_unc_mean:.4f}" if not np.isnan(seg_unc_mean) else "N/A"
+    peak_unc_str = f"{seg_unc_max:.4f}" if not np.isnan(seg_unc_max) else "N/A"
     low_pct = float(cls_probs[0] * 100)
     med_pct = float(cls_probs[1] * 100)
     high_pct = float(cls_probs[2] * 100)
+    alpha_low = float(cls_alpha[0])
+    alpha_med = float(cls_alpha[1])
+    alpha_high = float(cls_alpha[2])
+    evidence_low = max(0.0, alpha_low - 1.0)
+    evidence_med = max(0.0, alpha_med - 1.0)
+    evidence_high = max(0.0, alpha_high - 1.0)
 
     report = f"""
 <div class="results-container">
   <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:0.5rem">
-    <div style="font-size:1.1rem; font-weight:700; color:#f8fafc; display:flex; align-items:center; gap:0.5rem">
-      <span>📊</span> Clinical Inference Telemetry
+    <div style="font-size:1.15rem; font-weight:700; color:#f8fafc; display:flex; align-items:center; gap:0.5rem">
+      <span>📊</span> Clinical Inference Telemetry & Model Outputs
     </div>
-    <span class="burden-pill {burden_name}">
-      {burden_name.upper()} BURDEN
-    </span>
+    <div style="display:flex; gap:0.5rem; align-items:center;">
+      <span class="burden-pill {burden_name}">
+        {burden_name.upper()} BURDEN
+      </span>
+      <span style="font-size:0.85rem; font-weight:700; color:#38bdf8; background:rgba(56, 189, 248, 0.15); border:1px solid rgba(56, 189, 248, 0.3); padding:0.22rem 0.6rem; border-radius:6px;">
+        {model_confidence:.1f}% CONFIDENCE
+      </span>
+    </div>
   </div>
 
+  <!-- Primary 6 KPI Cards -->
   <div class="kpi-grid">
+    <div class="kpi-tile" style="border-color: rgba(56, 189, 248, 0.35);">
+      <div class="kpi-title" style="color:#38bdf8;">Total Model Confidence</div>
+      <div class="kpi-num" style="color:#38bdf8;">{model_confidence:.1f}%</div>
+      <div class="kpi-sub">Top: {burden_name.upper()} class</div>
+    </div>
+
     <div class="kpi-tile">
-      <div class="kpi-title">Tumor Volume</div>
-      <div class="kpi-num">{volume_ml:.1f} <span style="font-size:0.85rem; font-weight:500; color:#94a3b8">mL</span></div>
+      <div class="kpi-title">Tumour Volume</div>
+      <div class="kpi-num">{volume_ml:.2f} <span style="font-size:0.85rem; font-weight:500; color:#94a3b8">mL</span></div>
       <div class="kpi-sub">{tumor_voxels:,} voxels</div>
     </div>
 
     <div class="kpi-tile">
-      <div class="kpi-title">Model Burden</div>
-      <div class="kpi-num" style="font-size:1.25rem"><span class="burden-pill {burden_name}">{burden_name.upper()}</span></div>
-      <div class="kpi-sub">Confidence: {cls_probs[burden_idx]*100:.1f}%</div>
+      <div class="kpi-title">Model Burden Class</div>
+      <div class="kpi-num" style="font-size:1.25rem;"><span class="burden-pill {burden_name}">{burden_name.upper()}</span></div>
+      <div class="kpi-sub">Classification Head</div>
     </div>
 
     <div class="kpi-tile">
-      <div class="kpi-title">Seg-Derived</div>
-      <div class="kpi-num" style="font-size:1.25rem"><span class="burden-pill {seg_derived_name}">{seg_derived_name.upper()}</span></div>
-      <div class="kpi-sub">Volume cutoffs</div>
+      <div class="kpi-title">Seg-Derived Burden</div>
+      <div class="kpi-num" style="font-size:1.25rem;"><span class="burden-pill {seg_derived_name}">{seg_derived_name.upper()}</span></div>
+      <div class="kpi-sub">Volume tertile</div>
     </div>
 
     <div class="kpi-tile">
-      <div class="kpi-title">Mean Epistemic Unc.</div>
+      <div class="kpi-title">Mean Seg Uncertainty</div>
       <div class="kpi-num">{unc_str}</div>
-      <div class="kpi-sub">Evidential (2/S)</div>
+      <div class="kpi-sub">Voxel (2/S)</div>
+    </div>
+
+    <div class="kpi-tile">
+      <div class="kpi-title">Burden Uncertainty</div>
+      <div class="kpi-num">{cls_uncertainty:.4f}</div>
+      <div class="kpi-sub">Epistemic (3/S)</div>
     </div>
   </div>
 
+  <!-- Probability Distribution with Dirichlet Parameters -->
   <div class="prob-card">
-    <div style="font-size:0.8rem; font-weight:700; color:#cbd5e1; margin-bottom:0.6rem; text-transform:uppercase; letter-spacing:0.04em">
-      Burden Probability Distribution (Dirichlet α)
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem;">
+      <span style="font-size:0.8rem; font-weight:700; color:#cbd5e1; text-transform:uppercase; letter-spacing:0.04em">
+        Burden Probability Distribution (Dirichlet α)
+      </span>
+      <span style="font-size:0.75rem; color:#94a3b8;">
+        Total Strength S = {cls_strength:.2f}
+      </span>
     </div>
+
     <div class="prob-item">
       <div class="prob-header">
-        <span>Low Burden (&lt;64.9 mL)</span>
-        <span style="font-family:var(--font-mono)">{low_pct:.1f}%</span>
+        <span>Low Burden (&lt;64.9 mL) <span style="font-size:0.72rem; color:#94a3b8; font-weight:400;">[α={alpha_low:.2f}, e={evidence_low:.2f}]</span></span>
+        <span style="font-family:var(--font-mono)">{low_pct:.2f}%</span>
       </div>
       <div class="prob-track">
-        <div class="prob-bar bar-low" style="width: {low_pct:.1f}%"></div>
+        <div class="prob-bar bar-low" style="width: {low_pct:.2f}%"></div>
       </div>
     </div>
+
     <div class="prob-item">
       <div class="prob-header">
-        <span>Medium Burden (64.9–121.1 mL)</span>
-        <span style="font-family:var(--font-mono)">{med_pct:.1f}%</span>
+        <span>Medium Burden (64.9–121.1 mL) <span style="font-size:0.72rem; color:#94a3b8; font-weight:400;">[α={alpha_med:.2f}, e={evidence_med:.2f}]</span></span>
+        <span style="font-family:var(--font-mono)">{med_pct:.2f}%</span>
       </div>
       <div class="prob-track">
-        <div class="prob-bar bar-medium" style="width: {med_pct:.1f}%"></div>
+        <div class="prob-bar bar-medium" style="width: {med_pct:.2f}%"></div>
       </div>
     </div>
+
     <div class="prob-item">
       <div class="prob-header">
-        <span>High Burden (&gt;121.1 mL)</span>
-        <span style="font-family:var(--font-mono)">{high_pct:.1f}%</span>
+        <span>High Burden (&gt;121.1 mL) <span style="font-size:0.72rem; color:#94a3b8; font-weight:400;">[α={alpha_high:.2f}, e={evidence_high:.2f}]</span></span>
+        <span style="font-family:var(--font-mono)">{high_pct:.2f}%</span>
       </div>
       <div class="prob-track">
-        <div class="prob-bar bar-high" style="width: {high_pct:.1f}%"></div>
+        <div class="prob-bar bar-high" style="width: {high_pct:.2f}%"></div>
       </div>
     </div>
+  </div>
+
+  <!-- Complete Comprehensive Model Telemetry Table -->
+  <div class="data-table-container">
+    <div style="font-size:0.82rem; font-weight:700; color:#cbd5e1; margin-bottom:0.6rem; text-transform:uppercase; letter-spacing:0.04em; display:flex; align-items:center; gap:0.4rem;">
+      <span>📋</span> Full Model & Inference Data Breakdown
+    </div>
+    <table class="clinical-table">
+      <thead>
+        <tr>
+          <th>Metric Name</th>
+          <th>Model Output Value</th>
+          <th>Clinical / Technical Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Total Model Confidence</strong></td>
+          <td><strong style="color:#38bdf8; font-size:1.02rem;">{model_confidence:.2f}%</strong></td>
+          <td>Confidence in top predicted burden class ({burden_name.upper()})</td>
+        </tr>
+        <tr>
+          <td><strong>Predicted Burden Class (Model)</strong></td>
+          <td><span class="burden-pill {burden_name}">{burden_name.upper()}</span></td>
+          <td>Direct prediction from the evidential classification head</td>
+        </tr>
+        <tr>
+          <td><strong>Seg-Derived Burden Class</strong></td>
+          <td><span class="burden-pill {seg_derived_name}">{seg_derived_name.upper()}</span></td>
+          <td>Derived from total segmentation volume (<64.9 / 64.9-121.1 / >121.1 mL)</td>
+        </tr>
+        <tr>
+          <td><strong>Tumour Volume</strong></td>
+          <td><strong>{volume_ml:.2f} mL</strong></td>
+          <td>Total estimated whole tumor volume (WT)</td>
+        </tr>
+        <tr>
+          <td><strong>Tumour Voxel Count</strong></td>
+          <td><strong>{tumor_voxels:,} voxels</strong></td>
+          <td>Number of voxels above probability threshold</td>
+        </tr>
+        <tr>
+          <td><strong>Slices with Tumour</strong></td>
+          <td><strong>{tumor_slices_count} / {prob.shape[0]} slices</strong></td>
+          <td>Representative mid-axial slice displayed: Z={mid_d}</td>
+        </tr>
+        <tr>
+          <td><strong>Segmentation Cutoff (Threshold)</strong></td>
+          <td><strong>{threshold:.2f}</strong></td>
+          <td>Active probability threshold for mask binarization</td>
+        </tr>
+        <tr>
+          <td><strong>Mean Segmentation Uncertainty</strong></td>
+          <td><strong>{unc_str}</strong></td>
+          <td>Average evidential epistemic uncertainty (2/S) across tumor mask</td>
+        </tr>
+        <tr>
+          <td><strong>Peak Segmentation Uncertainty</strong></td>
+          <td><strong>{peak_unc_str}</strong></td>
+          <td>Highest local epistemic uncertainty within segmented tumor</td>
+        </tr>
+        <tr>
+          <td><strong>Burden Classification Uncertainty</strong></td>
+          <td><strong>{cls_uncertainty:.4f}</strong></td>
+          <td>Overall Dirichlet epistemic uncertainty (3/S) for classification</td>
+        </tr>
+        <tr>
+          <td><strong>Total Evidence Strength (S)</strong></td>
+          <td><strong>{cls_strength:.2f}</strong></td>
+          <td>Total Dirichlet pseudo-counts (higher = more evidence observed)</td>
+        </tr>
+        <tr>
+          <td><strong>Dirichlet Alphas [α_low, α_med, α_high]</strong></td>
+          <td><strong>[{alpha_low:.2f}, {alpha_med:.2f}, {alpha_high:.2f}]</strong></td>
+          <td>Raw evidence parameters: e = [{evidence_low:.2f}, {evidence_med:.2f}, {evidence_high:.2f}]</td>
+        </tr>
+        <tr>
+          <td><strong>Burden Probabilities Breakdown</strong></td>
+          <td><strong>Low: {low_pct:.1f}% | Med: {med_pct:.1f}% | High: {high_pct:.1f}%</strong></td>
+          <td>Normalized categorical belief distribution over volume classes</td>
+        </tr>
+        <tr>
+          <td><strong>MRI Native Grid Dimensions</strong></td>
+          <td><strong>{input_shape[0]} × {input_shape[1]} × {input_shape[2]}</strong></td>
+          <td>Voxel resolution: {voxel_mm3:.2f} mm³</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </div>
 """
@@ -634,6 +762,47 @@ body, .gradio-container {
 .bar-low { background: linear-gradient(90deg, #10b981, #34d399); }
 .bar-medium { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
 .bar-high { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+.data-table-container {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  padding: 0.95rem 1rem;
+  margin-top: 0.85rem;
+  overflow-x: auto;
+}
+
+.clinical-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.81rem;
+  text-align: left;
+}
+
+.clinical-table th {
+  background: rgba(30, 41, 59, 0.6);
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.clinical-table td {
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+}
+
+.clinical-table tr:last-child td {
+  border-bottom: none;
+}
+
+.clinical-table tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
 
 .empty-state {
   text-align: center;
